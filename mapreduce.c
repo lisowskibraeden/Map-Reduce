@@ -30,7 +30,7 @@ typedef struct Intermediate{
 pthread_mutex_t intermediate;
 pthread_mutex_t reduceLock;
 __thread Intermediate *head = NULL;
-__thread char** combine;
+__thread char** combine_key;
 __thread size_t size_combine = 0;
 Intermediate **final = NULL;
 Mapper mapFunc;
@@ -54,6 +54,7 @@ char *get_next_reduce(char* key, int partition_number){
             }
             char* value = malloc(strlen(iter->value) + 1);
             strcpy(value, iter->value);
+            free(iter->value);
             free(iter);
             return value;
         }
@@ -81,6 +82,7 @@ char *get_next(char* key){
             pthread_mutex_unlock(&intermediate);
             char* value = malloc(strlen(iter->value) + 1);
             strcpy(value, iter->value);
+            free(iter->value);
             free(iter);
             return value;
         }
@@ -93,11 +95,13 @@ char *get_next(char* key){
 
 void MR_EmitToCombiner(char *key, char *value){
     Intermediate *new = malloc(sizeof(Intermediate));
-    new->key = key;
-    new->value = value;
+    new->value = malloc(strlen(value) + 1);
+    new->key = malloc(strlen(key) + 1);
+    strcpy(new->value, value);
+    strcpy(new->key, key);
     size_combine++;
-    combine = realloc(combine, sizeof(char*) * size_combine);
-    combine[size_combine - 1] = key;
+    combine_key = realloc(combine_key, sizeof(char*) * size_combine);
+    combine_key[size_combine - 1] = new->key;
     pthread_mutex_lock(&intermediate);
     new->next = head;
     head = new;
@@ -108,7 +112,8 @@ void MR_EmitToReducer(char *key, char *value){
     unsigned long partition = partitionFunc(key, numPartitions);
     Intermediate *new = malloc(sizeof(Intermediate));
     new->key = key; 
-    new->value = value;
+    new->value = malloc(strlen(value) + 1);
+    strcpy(new->value, value);
     pthread_mutex_lock(&reduceLock);
     new->next = final[partition];
     final[partition] = new;
@@ -125,14 +130,14 @@ unsigned long MR_DefaultHashPartition(char *key, int num_partitions) {
 
 void combineAll(){
     for(int i = 0; i < size_combine; i++){
-        combineFunc(combine[i], get_next);
+        combineFunc(combine_key[i], get_next);
     }
-    free(combine);
+    free(combine_key);
 }
 
 void *mapper_wrapper(void *mapper_args){
     MapperArgs *args = (MapperArgs*)mapper_args;
-    combine = malloc(sizeof(char*));
+    combine_key = malloc(sizeof(char*));
     for(int i = 0; i < args->argc; i++) {
         mapFunc(args->argv[i]);
         combineAll();
@@ -140,14 +145,16 @@ void *mapper_wrapper(void *mapper_args){
     }
     free(args->argv);
     free(args);
+    return NULL;
 }
 
 void *reduce_wrapper(void *reduce_args){
     ReducerArgs *args = (ReducerArgs*)reduce_args;
     while(final[args->partitionNum] != NULL){
-        reduceFunc(final[args->partitionNum]->key, get_next_reduce, args->partitionNum);
+        reduceFunc(final[args->partitionNum]->key, NULL, get_next_reduce, args->partitionNum);
     }
     free(args);
+    return NULL;
 }
 
 void MR_Run(int argc, char *argv[],
@@ -168,7 +175,6 @@ void MR_Run(int argc, char *argv[],
                 printf("mutex init has failed\n");
                 exit(1);
             }
-            printf("hello\n");
             pthread_t map_threads[num_mappers];
             MapperArgs *mapper_args;
             int files = (argc - 1) / num_mappers;
@@ -192,10 +198,6 @@ void MR_Run(int argc, char *argv[],
             }
             // Barrier
             
-            if(pthread_mutex_init(&reduceLock, NULL) != 0){
-                printf("mutex init has failed\n");
-                exit(1);
-            }
             pthread_t reduce_threads[num_reducers];
             ReducerArgs *reduce_args;
             for (int i = 0; i < num_reducers; i++){
